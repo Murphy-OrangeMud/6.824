@@ -46,14 +46,13 @@ func (m *Master) IsAlive(args *ExampleArgs, reply *AliveReply) error {
 
 //AssignTask : assign a task to the worker
 func (m *Master) AssignTask(args *ExampleArgs, reply *TaskAssign) error {
-	fmt.Println("assigning task...")
 	// map task
 	if args.X == 0 {
-		for _, task := range m.mapTaskInfo {
+		for i, task := range m.mapTaskInfo {
 			m.mutex.Lock()
 			if task.Status == 0 {
 				reply.MapNum = task.MapNum
-				task.Status = 1
+				m.mapTaskInfo[i].Status = 1
 				m.mutex.Unlock()
 				return nil
 			}
@@ -62,13 +61,12 @@ func (m *Master) AssignTask(args *ExampleArgs, reply *TaskAssign) error {
 		if m.completedMapTask == m.nMap {
 			reply.MapNum = -2
 		}
-		fmt.Printf("%v %v\n", reply.MapNum, reply.ReduceNum)
 	} else { // args.X == 1, reduce task
-		for _, task := range m.reduceTaskInfo {
+		for i, task := range m.reduceTaskInfo {
 			m.mutex.Lock()
 			if task.Status == 0 {
 				reply.ReduceNum = task.ReduceNum
-				task.Status = 1
+				m.mapTaskInfo[i].Status = 1
 				m.mutex.Unlock()
 				return nil
 			}
@@ -82,12 +80,11 @@ func (m *Master) AssignTask(args *ExampleArgs, reply *TaskAssign) error {
 }
 
 func (m *Master) TaskStatusUpdate(args *TaskInfo, reply *ExampleReply) error {
-	fmt.Printf("update task for map: %v and reduce %v\n", args.MapNum, args.ReduceNum)
 	if args.MapNum != -1 {
-		for _, task := range m.mapTaskInfo {
+		for i, task := range m.mapTaskInfo {
 			m.mutex.Lock()
 			if task.MapNum == args.MapNum {
-				task.Status = args.Status
+				m.mapTaskInfo[i].Status = args.Status
 				m.mutex.Unlock()
 				break
 			}
@@ -99,10 +96,10 @@ func (m *Master) TaskStatusUpdate(args *TaskInfo, reply *ExampleReply) error {
 			m.mutex.Unlock()
 		}
 	} else {
-		for _, task := range m.reduceTaskInfo {
+		for i, task := range m.reduceTaskInfo {
 			m.mutex.Lock()
 			if task.ReduceNum == args.ReduceNum {
-				task.Status = args.Status
+				m.reduceTaskInfo[i].Status = args.Status
 				m.mutex.Unlock()
 				break
 			}
@@ -283,30 +280,14 @@ func MakeMaster(files []string, nReduce int) *Master {
 			MapNum: -1, ReduceNum: i, Status: 0, Pid: 0,
 		})
 	}
-	
-	m.completedMapTask = 0
-	m.completedReduceTask = 0
-
-	// fmt.Print(m.completedMapTask, m.nMap, m.completedReduceTask, m.nReduce)
 
 	m.server()
 
-	l := sync.Mutex{}
-	c := sync.NewCond(&l)
-	
-	/*
-	c.L.Lock()
-	c.Broadcast()
-	c.L.Unlock()
-	*/
+	fmt.Println("ready to handle map tasks...")
 
 	for m.completedMapTask < m.nMap {}
 
 	fmt.Println("begin reduce task...")
-
-	c.L.Lock()
-	c.Broadcast()
-	c.L.Unlock()
 
 	for m.completedReduceTask < m.nReduce {}
 

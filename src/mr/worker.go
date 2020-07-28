@@ -7,7 +7,7 @@ import (
 	"net/rpc"
 	"hash/fnv"
 	"os"
-	"sync"
+	//"sync"
 	"encoding/json"
 	"time"
 	"sort"
@@ -75,6 +75,7 @@ func Worker(mapf func(string, string) []KeyValue,
 			log.Fatalf("assign map task failed")
 			os.Exit(1)
 		} else {
+			fmt.Println(reply.MapNum)
 			if reply.MapNum >= 0 {
 				filename := fmt.Sprintf("map-%v" + info.Suffix, reply.MapNum)
 				file, err := os.Open(fmt.Sprintf("map-%v" + info.Suffix, reply.MapNum))
@@ -111,7 +112,7 @@ func Worker(mapf func(string, string) []KeyValue,
 						continue
 					} 
 
-					tempJsonfile, err := ioutil.TempFile(".", jsonfileName)
+					tempJsonfile, err := ioutil.TempFile(".", fmt.Sprintf("mr-%v-%v*.json", reply.MapNum, i))
 					
 					if err != nil {
 						log.Fatalf("cannot create tempfile %v", jsonfileName)
@@ -126,15 +127,31 @@ func Worker(mapf func(string, string) []KeyValue,
 					tempJsonfiles[jsonfileName] = tempJsonfile
 				}
 
+				encs := make(map[string]*json.Encoder)
+
+				for i := 1; i <= info.NMap; i++ {
+					for j := 1; j <= info.NReduce; j++ {
+						tempjsonfile := tempJsonfiles[fmt.Sprintf("mr-%v-%v.json", i, j)]
+
+						if tempjsonfile == nil {
+							encs[fmt.Sprintf("mr-%v-%v.json", i, j)] = nil
+							continue
+						}
+
+						encs[fmt.Sprintf("mr-%v-%v.json", i, j)] = json.NewEncoder(tempjsonfile)
+					}
+				}
+
 				for _, kv := range kva {
 					reduceNum := ihash(kv.Key) % info.NReduce + 1
-					tempjsonfile := tempJsonfiles[fmt.Sprintf("mr-%v-%v.json", reply.MapNum, reduceNum)]
+					name := fmt.Sprintf("mr-%v-%v.json", reply.MapNum, reduceNum)
+					tempjsonfile := tempJsonfiles[name]
 
 					if tempjsonfile == nil {
 						continue
 					}
 
-					enc := json.NewEncoder(tempjsonfile)
+					enc := encs[name]
 
 					err := enc.Encode(&kv)
 					if err != nil {
@@ -181,13 +198,6 @@ func Worker(mapf func(string, string) []KeyValue,
 		}
 	
 	}
-	
-	l := sync.Mutex{}
-	cond := sync.NewCond(&l)
-
-	cond.L.Lock()
-	cond.Wait()
-	cond.L.Unlock()
 
 	for {
 		reply := TaskAssign{-1, -1}
@@ -206,9 +216,8 @@ func Worker(mapf func(string, string) []KeyValue,
 		}
 
 		if reply.ReduceNum > 0 {
-			// fmt.Println(reply.ReduceNum)
-			for i := 0; i < info.NMap; i++ {
-				filename := fmt.Sprintf("mr-%v-%v" + info.Suffix, i, reply.ReduceNum)
+			for i := 1; i <= info.NMap; i++ {
+				filename := fmt.Sprintf("mr-%v-%v.json", i, reply.ReduceNum)
 				
 				file, err := os.Open(filename)
 				if err != nil {

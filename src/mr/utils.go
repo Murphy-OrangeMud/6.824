@@ -4,6 +4,7 @@ import (
 	"io/ioutil"
 	"os"
 	"log"
+	"io"
 )
 
 func open(filename string) *os.File{
@@ -17,10 +18,10 @@ func open(filename string) *os.File{
 	return file
 }
 
-func readall(filename string) []byte {
-	content, err := ioutil.ReadAll(filename)
+func readall(file io.Reader) []byte {
+	content, err := ioutil.ReadAll(file)
 	if err != nil {
-		log.Fatalf("cannot read %v", filename)
+		log.Fatalf("cannot read %v", file)
 	}
 	return content
 }

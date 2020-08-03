@@ -57,7 +57,7 @@ func (w *Workers) doMapTask() {
 		if task.MapNum > 0 {
 			filename := fmt.Sprintf("map-%v"+task.Suffix, task.MapNum)
 			file := open(filename)
-			content := readall(filename)
+			content := readall(file)
 
 			kva := w.mapf(filename, string(content))
 

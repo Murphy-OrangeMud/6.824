@@ -1,18 +1,19 @@
 package mr
 
 import (
-	"io/ioutil"
+	//"io/ioutil"
 	"fmt"
+	"hash/fnv"
 	"log"
 	"net/rpc"
-	"hash/fnv"
 	"os"
+	"os/exec"
+
 	//"sync"
 	"encoding/json"
-	"time"
+	//"time"
 	"sort"
 )
-
 
 //
 // Map functions return a slice of KeyValue.
@@ -30,6 +31,14 @@ func (a ByKey) Len() int           { return len(a) }
 func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
+type Workers struct {
+	id      int
+	mapf    func(filename string, content string) []KeyValue
+	reducef func(key string, values []string) string
+	NMap    int
+	NReduce int
+}
+
 //
 // use ihash(key) % NReduce to choose the reduce
 // task number for each KeyValue emitted by Map.
@@ -40,199 +49,106 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
+func (w *Workers) doMapTask() {
+	task := TaskAssign{}
+	if call("Master.AssignTask", &ExampleArgs{}, &task) == false {
+		return
+	} else {
+		if task.MapNum > 0 {
+			filename := fmt.Sprintf("map-%v"+task.Suffix, task.MapNum)
+			file := open(filename)
+			content := readall(filename)
 
-//
-// main/mrworker.go calls this function.
-//
-func Worker(mapf func(string, string) []KeyValue,
-	reducef func(string, []string) string) {
+			kva := w.mapf(filename, string(content))
 
-	// Your worker implementation here.	
+			tempJsonfiles := make(map[string]*os.File)
 
-	info := Info{}
+			for i := 1; i <= w.NReduce; i++ {
+				jsonfileName := fmt.Sprintf("mr-%v-%v.json", task.MapNum, i)
 
-	err := call("Master.InitWorker", &ExampleArgs{}, &info)
-
-	if err == false {
-		log.Fatalf("initialization failed for worker")
-		os.Exit(1)
-	}
-
-	/*
-	cond.L.Lock()
-	cond.Wait()
-	cond.L.Unlock()
-	*/
-
-	for {
-		fmt.Println("another loop...")
-
-		reply := TaskAssign{-1, -1}
-
-		err = call("Master.AssignTask", &ExampleArgs{0,}, &reply)
-
-		if err == false {
-			log.Fatalf("assign map task failed")
-			os.Exit(1)
-		} else {
-			fmt.Println(reply.MapNum)
-			if reply.MapNum >= 0 {
-				filename := fmt.Sprintf("map-%v" + info.Suffix, reply.MapNum)
-				file, err := os.Open(fmt.Sprintf("map-%v" + info.Suffix, reply.MapNum))
-
-				if err != nil {
-					log.Fatalf("cannot open %v", filename)
-					call("Master.TaskStatusUpdate", &TaskInfo {
-						reply.MapNum,
-						reply.ReduceNum,
-						0,
-						0,
-					}, &ExampleReply{})
-				}
-				content, err := ioutil.ReadAll(file)
-				if err != nil {
-					log.Fatalf("cannot read %v", filename)
-					call("Master.TaskStatusUpdate", &TaskInfo {
-						reply.MapNum,
-						reply.ReduceNum,
-						0,
-						0,
-					}, &ExampleReply{})
-				}
-				file.Close()
-				kva := mapf(filename, string(content))
-
-				tempJsonfiles := make(map[string]*os.File)
-
-				for i := 1; i <= info.NReduce; i++ {
-					jsonfileName := fmt.Sprintf("mr-%v-%v.json", reply.MapNum, i)
-					
-					if Exist(jsonfileName) {
-						tempJsonfiles[jsonfileName] = nil
-						continue
-					} 
-
-					tempJsonfile, err := ioutil.TempFile(".", fmt.Sprintf("mr-%v-%v*.json", reply.MapNum, i))
-					
-					if err != nil {
-						log.Fatalf("cannot create tempfile %v", jsonfileName)
-						call("Master.TaskStatusUpdate", &TaskInfo {
-							reply.MapNum,
-							reply.ReduceNum,
-							0,
-							0,
-						}, &ExampleReply{})
-					}
-
-					tempJsonfiles[jsonfileName] = tempJsonfile
+				if exist(jsonfileName) {
+					tempJsonfiles[jsonfileName] = nil
+					continue
 				}
 
-				encs := make(map[string]*json.Encoder)
+				tempJsonfile := tempfile(".", jsonfileName)
+				defer tempJsonfile.Close()
+				tempJsonfiles[jsonfileName] = tempJsonfile
+			}
 
-				for i := 1; i <= info.NMap; i++ {
-					for j := 1; j <= info.NReduce; j++ {
-						tempjsonfile := tempJsonfiles[fmt.Sprintf("mr-%v-%v.json", i, j)]
+			encs := make(map[string]*json.Encoder)
 
-						if tempjsonfile == nil {
-							encs[fmt.Sprintf("mr-%v-%v.json", i, j)] = nil
-							continue
-						}
-
-						encs[fmt.Sprintf("mr-%v-%v.json", i, j)] = json.NewEncoder(tempjsonfile)
-					}
-				}
-
-				for _, kv := range kva {
-					reduceNum := ihash(kv.Key) % info.NReduce + 1
-					name := fmt.Sprintf("mr-%v-%v.json", reply.MapNum, reduceNum)
-					tempjsonfile := tempJsonfiles[name]
+			for i := 1; i <= w.NMap; i++ {
+				for j := 1; j <= w.NReduce; j++ {
+					tempjsonfile := tempJsonfiles[fmt.Sprintf("mr-%v-%v.json", i, j)]
 
 					if tempjsonfile == nil {
+						encs[fmt.Sprintf("mr-%v-%v.json", i, j)] = nil
 						continue
 					}
 
-					enc := encs[name]
+					encs[fmt.Sprintf("mr-%v-%v.json", i, j)] = json.NewEncoder(tempjsonfile)
+				}
+			}
 
-					err := enc.Encode(&kv)
-					if err != nil {
-						log.Fatalf("encode failed in %v", filename)
-						tempjsonfile.Close()
-						call("Master.TaskStatusUpdate", &TaskInfo {
-							reply.MapNum,
-							reply.ReduceNum,
-							0,
-							0,
-						}, &ExampleReply{})
-					}
+			for _, kv := range kva {
+				reduceNum := ihash(kv.Key)%w.NReduce + 1
+				name := fmt.Sprintf("mr-%v-%v.json", task.MapNum, reduceNum)
+				tempjsonfile := tempJsonfiles[name]
+
+				if tempjsonfile == nil {
+					continue
 				}
 
-				for filename, file := range tempJsonfiles {
-					if file == nil {
-						continue
-					}
-					err := os.Rename(file.Name(), filename)
-					if err != nil {
-						log.Fatalf("rename failed in %v", filename)
-						file.Close()
-						// to be revised
-						call("Master.TaskStatusUpdate", &TaskInfo {
-							reply.MapNum,
-							reply.ReduceNum,
-							0,
-							0,
-						}, &ExampleReply{})
-					}
-				}
+				enc := encs[name]
 
-				call("Master.TaskStatusUpdate", &TaskInfo {
-					reply.MapNum,
-					reply.ReduceNum,
-					2,
-					0,
-				}, &ExampleReply{})
-			}
-		}
-
-		if reply.MapNum == -2 {
-			break
-		}
-	
-	}
-
-	for {
-		reply := TaskAssign{-1, -1}
-
-		for {
-			err := call("Master.AssignTask", &ExampleArgs{1}, &reply)
-			
-			if err == false {
-				log.Fatalf("assign reduce task failed for worker")
-				os.Exit(1)
-			}
-			if reply.ReduceNum != -1 {
-				break
-			}
-			time.Sleep(100)
-		}
-
-		if reply.ReduceNum > 0 {
-			for i := 1; i <= info.NMap; i++ {
-				filename := fmt.Sprintf("mr-%v-%v.json", i, reply.ReduceNum)
-				
-				file, err := os.Open(filename)
+				err := enc.Encode(&kv)
 				if err != nil {
-					log.Fatalf("cannot open file %v", filename)
-					call("Master.TaskStatusUpdate", &TaskInfo {
-						reply.MapNum,
-						reply.ReduceNum,
-						0,
-						0,
+					log.Fatalf("encode failed in %v", filename)
+					defer exec.Command("rm", tempjsonfile.Name()).Run()
+					defer tempjsonfile.Close()
+
+					call("Master.TaskStatusUpdate", &TaskInfo{
+						MapNum:    task.MapNum,
+						ReduceNum: task.ReduceNum,
+						Status:    TaskFailed,
+						WorkerId:  w.id,
 					}, &ExampleReply{})
+
+					return
 				}
+			}
+
+			for filename, file := range tempJsonfiles {
+				if file == nil {
+					continue
+				}
+				os.Rename(file.Name(), filename)
+			}
+
+			call("Master.TaskStatusUpdate", &TaskInfo{
+				MapNum:    task.MapNum,
+				ReduceNum: task.ReduceNum,
+				Status:    TaskCompleted,
+				WorkerId:  w.id,
+			}, &ExampleReply{})
+		}
+	}
+}
+
+func (w *Workers) doReduceTask() {
+	task := TaskAssign{}
+	if call("Master.AssignTask", &ExampleArgs{}, &task) == false {
+		return
+	} else {
+		if task.ReduceNum > 0 {
+			kva := []KeyValue{}
+			for i := 1; i < w.NMap; i++ {
+				filename := fmt.Sprintf("mr-%v-%v.json", i, task.ReduceNum)
+
+				file := open(filename)
 
 				dec := json.NewDecoder(file)
-				
-				kva := []KeyValue{}
 
 				for {
 					var kv KeyValue
@@ -241,85 +157,92 @@ func Worker(mapf func(string, string) []KeyValue,
 					}
 					kva = append(kva, kv)
 				}
-
-				sort.Sort(ByKey(kva))
-
-				reduceName := fmt.Sprintf("mr-out-%v", reply.ReduceNum)
-				reduceFile, err := os.Create(reduceName)
-
-				if err != nil {
-					log.Fatalf("cannot create %v", reduceName)
-					call("Master.TaskStatusUpdate", &TaskInfo {
-						reply.MapNum,
-						reply.ReduceNum,
-						0,
-						0,
-					}, &ExampleReply{})
-				}
-
-				for key, value := range kva {
-					fmt.Fprintf(reduceFile, "%v %v\n", key, value)
-				}
-				
-				call("Master.TaskStatusUpdate", &TaskInfo {
-					reply.MapNum,
-					reply.ReduceNum,
-					2,
-					0,
-				}, &ExampleReply{})
 			}
-		}
 
-		if reply.ReduceNum == -2 {
-			break
+			sort.Sort(ByKey(kva))
+
+			reduceName := fmt.Sprintf("mr-out-%v", task.ReduceNum)
+			reduceFile := create(reduceName)
+
+			i := 0
+			for i < len(kva) {
+				j := i + 1
+				for j < len(kva) && kva[j].Key == kva[i].Key {
+					j++
+				}
+				values := []string{}
+
+				for k := i; k < j; k++ {
+					values = append(values, kva[k].Value)
+				}
+				output := w.reducef(kva[i].Key, values)
+				fmt.Fprintf(reduceFile, "%v %v\n", kva[i].Key, output)
+				i = j
+			}
+
+			call("Master.TaskStatusUpdate", &TaskInfo{
+				MapNum:    task.MapNum,
+				ReduceNum: task.ReduceNum,
+				Status:    TaskCompleted,
+				WorkerId:  w.id,
+			}, &ExampleReply{})
 		}
 	}
-	
-	// uncomment to send the Example RPC to the master.
-	// CallExample()
+}
 
+func (w *Workers) doTask() error {
+	task := TaskAssign{}
+	if call("Master.AssignTask", &ExampleArgs{}, &task) == false {
+		isFinished()
+	} else {
+		if task.MapNum != -1 {
+			w.doMapTask()
+		} else if task.ReduceNum != -1 {
+			w.doReduceTask()
+		}
+	}
+	return nil
 }
 
 //
-// example function to show how to make an RPC call to the master.
+// main/mrworker.go calls this function.
 //
-// the RPC argument and reply types are defined in rpc.go.
-//
-func CallExample() {
+func Worker(mapf func(string, string) []KeyValue,
+	reducef func(string, []string) string) {
 
-	// declare an argument structure.
-	args := ExampleArgs{}
+	w := Workers{
+		mapf:    mapf,
+		reducef: reducef,
+	}
 
-	// fill in the argument(s).
-	args.X = 99
+	call("Master.InitWorker", &w, &ExampleReply{})
 
-	// declare a reply structure.
-	reply := ExampleReply{}
+	r := AliveReply{false}
+	call("Master.IsAlive", &ExampleArgs{}, &r)
 
-	// send the RPC request, wait for the reply.
-	call("Master.Example", &args, &reply)
-
-	// reply.Y should be 100.
-	fmt.Printf("reply.Y %v\n", reply.Y)
+	for r.IsAlive {
+		w.doTask()
+		r.IsAlive = false
+		call("Master.IsAlive", &ExampleArgs{}, &r)
+	}
 }
 
 func isFinished() {
-	reply := AliveReply{false}
+	task := AliveReply{false}
 
-	call("Master.IsAlive", &ExampleArgs{}, &reply)
+	call("Master.IsAlive", &ExampleArgs{}, &task)
 
-	if reply.IsAlive == false {
+	if task.IsAlive == false {
 		os.Exit(0)
 	}
 }
-
 
 //
 // send an RPC request to the master, wait for the response.
 // usually returns true.
 // returns false if something goes wrong.
 //
-func call(rpcname string, args interface{}, reply interface{}) bool {
+func call(rpcname string, args interface{}, task interface{}) bool {
 	// c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
 	sockname := masterSock()
 	c, err := rpc.DialHTTP("unix", sockname)
@@ -328,17 +251,12 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 	}
 	defer c.Close()
 
-	err = c.Call(rpcname, args, reply)
-	
+	err = c.Call(rpcname, args, task)
+
 	if err == nil {
 		return true
 	}
 
 	fmt.Println(err)
 	return false
-}
-
-func Exist(filename string) bool {
-    _, err := os.Stat(filename)
-    return err == nil || os.IsExist(err)
 }

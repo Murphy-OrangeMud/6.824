@@ -8,6 +8,7 @@ package mr
 
 import "os"
 import "strconv"
+import "time"
 
 //
 // example to show how to declare the arguments
@@ -31,19 +32,16 @@ type AliveReply struct {
 type TaskAssign struct {
 	MapNum int
 	ReduceNum int
-}
-
-type Info struct {
-	NMap int
-	NReduce int
 	Suffix string
 }
 
 type TaskInfo struct {
 	MapNum int
 	ReduceNum int
-	Status int  // 0: unassigned, 1: in progress, 2: completed
-	Pid int
+	Suffix string
+	Status int
+	WorkerId int
+	StartTime time.Time
 }
 
 // Cook up a unique-ish UNIX-domain socket name

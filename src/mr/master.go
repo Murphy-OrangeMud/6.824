@@ -79,13 +79,14 @@ func (m *Master) AssignTask(args *ExampleArgs, reply *TaskAssign) error {
 		if task.Status == TaskNotAssigned {
 			reply.MapNum = task.MapNum
 			reply.ReduceNum = task.ReduceNum
+			reply.Suffix = task.Suffix
 			m.taskInfo[i].Status = TaskRunning
 			m.mutex.Unlock()
 			return nil
 		}
 		m.mutex.Unlock()
 	}
-	return nil
+	return errors.New("No task to assign temporarily")
 }
 
 func (m *Master) TaskStatusUpdate(args *TaskInfo, reply *ExampleReply) error {
@@ -113,7 +114,6 @@ func (m *Master) TaskStatusUpdate(args *TaskInfo, reply *ExampleReply) error {
 func (m *Master) InitWorker(args *Workers, reply *ExampleReply) error {
 	args.NMap = m.nMap
 	args.NReduce = m.nReduce
-	args.Suffix = m.suffix
 	args.id = m.workerNum
 	m.workerNum++
 	return nil

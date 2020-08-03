@@ -9,34 +9,30 @@ import (
 	"os"
 	"sync"
 	"io/ioutil"
+	"os/exec"
 	"regexp"
-	//"math"
-	//"time"
+	"errors"
+	"time"
 )
 
 type Master struct {
 	// Your definitions here.
 	mutex sync.Mutex
-	completedMapTask    int
-	completedReduceTask int
+	completedTask int
 	nReduce int
 	nMap int
+	workerNum int
+	done bool
 	suffix string
-	mapTaskInfo []TaskInfo
-	reduceTaskInfo []TaskInfo
+	taskInfo []TaskInfo
 }
 
-// Your code here -- RPC handlers for the worker to call.
-
-//
-// an example RPC handler.
-//
-// the RPC argument and reply types are defined in rpc.go.
-//
-func (m *Master) Example(args *ExampleArgs, reply *ExampleReply) error {
-	reply.Y = args.X + 1
-	return nil
-}
+const (
+	TaskFailed = -1
+	TaskNotAssigned = 0
+	TaskRunning = 1
+	TaskCompleted = 2
+)
 
 // confirm that the master routine is still running
 func (m *Master) IsAlive(args *ExampleArgs, reply *AliveReply) error {
@@ -44,80 +40,82 @@ func (m *Master) IsAlive(args *ExampleArgs, reply *AliveReply) error {
 	return nil
 }
 
-//AssignTask : assign a task to the worker
+func (m *Master) schedule() {
+	for !m.Done() {
+		for i, task := range m.taskInfo {
+			m.mutex.Lock()
+			curTime := time.Now()
+			switch task.Status {
+			case TaskFailed: {
+				m.taskInfo[i].Status = TaskNotAssigned
+				m.mutex.Unlock()
+				break
+			}
+			case TaskRunning: {
+				if curTime.Sub(task.StartTime) > 1e10 {
+					m.taskInfo[i].Status = TaskFailed
+					m.mutex.Unlock()
+					break
+				}
+			}
+			case TaskNotAssigned:
+			case TaskCompleted:
+			}
+		}
+		if m.completedTask == m.nMap  {
+			m.mutex.Lock()
+			m.InitReduce()
+			m.mutex.Unlock()
+		} else if m.completedTask ==  m.nMap + m.nReduce {
+			m.done = true
+		}
+		time.Sleep(1e8)
+	}
+}
+
 func (m *Master) AssignTask(args *ExampleArgs, reply *TaskAssign) error {
-	// map task
-	if args.X == 0 {
-		for i, task := range m.mapTaskInfo {
-			m.mutex.Lock()
-			if task.Status == 0 {
-				reply.MapNum = task.MapNum
-				m.mapTaskInfo[i].Status = 1
-				m.mutex.Unlock()
-				return nil
-			}
+	for i, task := range m.taskInfo {
+		m.mutex.Lock()
+		if task.Status == TaskNotAssigned {
+			reply.MapNum = task.MapNum
+			reply.ReduceNum = task.ReduceNum
+			m.taskInfo[i].Status = TaskRunning
 			m.mutex.Unlock()
+			return nil
 		}
-		if m.completedMapTask == m.nMap {
-			reply.MapNum = -2
-		}
-	} else { // args.X == 1, reduce task
-		for i, task := range m.reduceTaskInfo {
-			m.mutex.Lock()
-			if task.Status == 0 {
-				reply.ReduceNum = task.ReduceNum
-				m.mapTaskInfo[i].Status = 1
-				m.mutex.Unlock()
-				return nil
-			}
-			m.mutex.Unlock()
-		}
-		if m.completedMapTask == m.nMap {
-			reply.MapNum = -2
-		}
+		m.mutex.Unlock()
 	}
 	return nil
 }
 
 func (m *Master) TaskStatusUpdate(args *TaskInfo, reply *ExampleReply) error {
-	if args.MapNum != -1 {
-		for i, task := range m.mapTaskInfo {
-			m.mutex.Lock()
-			if task.MapNum == args.MapNum {
-				m.mapTaskInfo[i].Status = args.Status
-				m.mutex.Unlock()
-				break
-			}
-			m.mutex.Unlock()
-		}
-		if args.Status == 2 {
-			m.mutex.Lock()
-			m.completedMapTask++
-			m.mutex.Unlock()
-		}
-	} else {
-		for i, task := range m.reduceTaskInfo {
-			m.mutex.Lock()
-			if task.ReduceNum == args.ReduceNum {
-				m.reduceTaskInfo[i].Status = args.Status
-				m.mutex.Unlock()
-				break
-			}
-			m.mutex.Unlock()
-		}
-		if args.Status == 2 {
-			m.mutex.Lock()
-			m.completedMapTask++
-			m.mutex.Unlock()
-		}
+	if args.Status == TaskCompleted {
+		m.mutex.Lock()
+		m.completedTask++
+		m.mutex.Unlock()
 	}
-	return nil
+	for i, task := range m.taskInfo {
+		m.mutex.Lock()
+		if args.MapNum != -1 && task.MapNum == args.MapNum {
+			m.taskInfo[i].Status = args.Status
+			m.mutex.Unlock()
+			return nil
+		} else if args.ReduceNum != -1 && task.ReduceNum == args.ReduceNum {
+			m.taskInfo[i].Status = args.Status
+			m.mutex.Unlock()
+			return nil
+		}
+		m.mutex.Unlock()
+	}
+	return errors.New("Inexist task!\n")
 }
 
-func (m *Master) InitWorker(args *ExampleArgs, reply *Info) error {
-	reply.NReduce = m.nReduce
-	reply.NMap = m.nMap
-	reply.Suffix = m.suffix
+func (m *Master) InitWorker(args *Workers, reply *ExampleReply) error {
+	args.NMap = m.nMap
+	args.NReduce = m.nReduce
+	args.Suffix = m.suffix
+	args.id = m.workerNum
+	m.workerNum++
 	return nil
 }
 
@@ -142,14 +140,7 @@ func (m *Master) server() {
 // if the entire job has finished.
 //
 func (m *Master) Done() bool {
-	ret := false
-
-	// Your code here.
-	if m.completedMapTask == m.nMap && m.completedReduceTask == m.nReduce {
-		ret = true
-	}
-
-	return ret
+	return m.done
 }
 
 //
@@ -158,138 +149,21 @@ func (m *Master) Done() bool {
 // nReduce is the number of reduce tasks to use.
 //
 func MakeMaster(files []string, nReduce int) *Master {
-	m := Master{mutex: sync.Mutex{}, completedMapTask: 0, completedReduceTask: 0, nReduce: nReduce, nMap: 1, suffix: getSuffix(files[0]), mapTaskInfo: []TaskInfo{}, reduceTaskInfo: []TaskInfo{}, }
-
-	// Your code here.
-	// read in data and split
-
-	// deal with regular expression
-	fs := []string{}
-	
-	for _, path := range files {
-		dir, name := parsePath(path)
-
-		rd, err := ioutil.ReadDir(dir)
-
-		if err != nil {
-			log.Fatalf("parse directory failed")
-		}
-
-		for _, f := range rd {
-			match, _ := regexp.MatchString(name, f.Name())
-
-			if match == true && f.IsDir() {
-				log.Fatalf("incorrect paramter: %v is a directory", f.Name())
-				os.Exit(1)
-			}
-			if match == true {
-				fs = append(fs, dir + "/" + f.Name())
-			}
-		}
+	m := Master{
+		mutex: sync.Mutex{}, 
+		completedTask: 0, 
+		nReduce: nReduce, 
+		nMap: 1, 
+		workerNum: 0,
+		done: false, 
+		suffix: getSuffix(files[0]), 
+		taskInfo: []TaskInfo{}, 
 	}
 
-	const dataSegment = (1 << 26) // 64kb due to the paper
+	m.InitMap(files)
 
-	var sumSize int64
-	var maxSize int64
-	sumSize = 0
-	maxSize = dataSegment
-	for _, filename := range fs {
-		fi, err := os.Stat(filename)
-		
-		if err != nil {
-			log.Fatalf("cannot read metadata of %v", filename)
-			os.Exit(1)
-		}
-		sumSize += fi.Size()
-		maxSize = Max(maxSize, fi.Size())
-	}
-
-	if maxSize > dataSegment {
-		buffer := make([]byte, dataSegment)
-
-		wFile, err := os.Create(fmt.Sprintf("map-%v%v", m.nMap, m.suffix))
-		if err != nil {
-			log.Fatalf("cannot create %v", fmt.Sprintf("map-%v%v", m.nMap, m.suffix))
-		}
-		m.mapTaskInfo = append(m.mapTaskInfo, TaskInfo {
-			-1, m.nMap, 0, 0,
-		})
-		m.nMap++
-		var n int
-
-		for i := 0; i < len(fs); {
-
-			filename := fs[i]
-			fmt.Println(filename)
-
-			file, err := os.Open(filename)
-			
-			if err != nil {
-				log.Fatalf("cannot open file %v", filename)
-				os.Exit(1)
-			}
-			
-			n, err = file.Read(buffer)
-			wFile.Write(buffer)
-			
-			if n == len(buffer) {
-				buffer = make([]byte, dataSegment)
-				wFile.Close()
-				wFile, err = os.Create(fmt.Sprintf("map-%v%v", m.nMap, m.suffix))
-				if err != nil {
-					log.Fatalf("cannot create file map-%v%v", m.nMap, m.suffix)
-				}
-				m.mapTaskInfo = append(m.mapTaskInfo, TaskInfo {
-					MapNum: m.nMap, ReduceNum: -1, Status: 0, Pid: 0,
-				})
-				m.nMap++
-			} else {
-				buffer = buffer[n:]
-				file.Close()
-				i++
-			}
-		}
-	} else {
-		for _, filename := range fs {
-
-			buffer, err := ioutil.ReadFile(filename)
-
-			if err != nil {
-				log.Fatalf("cannot read file %v", filename)
-			}
-
-			err = ioutil.WriteFile(fmt.Sprintf("map-%v" + m.suffix, m.nMap), buffer, 0777)
-
-			if err != nil {
-				log.Fatalf("cannot write file %v", fmt.Sprintf("map-%v" + m.suffix, m.nMap))
-			}
-
-			m.mapTaskInfo = append(m.mapTaskInfo, TaskInfo {
-				MapNum: m.nMap, ReduceNum: -1, Status: 0, Pid: 0,
-			})
-			m.nMap++
-		}
-	}
-
-	m.nMap--
-
-	// init reduce tasks
-	for i := 1; i <= nReduce; i++ {
-		m.reduceTaskInfo = append(m.reduceTaskInfo, TaskInfo {
-			MapNum: -1, ReduceNum: i, Status: 0, Pid: 0,
-		})
-	}
-
+	go m.schedule()
 	m.server()
-
-	fmt.Println("ready to handle map tasks...")
-
-	for m.completedMapTask < m.nMap {}
-
-	fmt.Println("begin reduce task...")
-
-	for m.completedReduceTask < m.nReduce {}
 
 	return &m
 }
@@ -338,4 +212,116 @@ func parsePath(path string) (string, string){
 
 	return dir, name
 	
+}
+
+func (m * Master) InitMap(files [] string) {
+	// deal with regular expression
+	fs := []string{}
+	
+	for _, path := range files {
+		dir, name := parsePath(path)
+
+		rd, err := ioutil.ReadDir(dir)
+
+		if err != nil {
+			log.Fatalf("parse directory failed")
+		}
+
+		for _, f := range rd {
+			match, _ := regexp.MatchString(name, f.Name())
+
+			if match == true && f.IsDir() {
+				log.Fatalf("incorrect paramter: %v is a directory", f.Name())
+				os.Exit(1)
+			}
+			if match == true {
+				fs = append(fs, dir + "/" + f.Name())
+			}
+		}
+	}
+
+	const dataSegment = (1 << 26) // 64kb due to the paper
+
+	var sumSize int64
+	var maxSize int64
+	sumSize = 0
+	maxSize = dataSegment
+	for _, filename := range fs {
+		fi, err := os.Stat(filename)
+		
+		if err != nil {
+			log.Fatalf("cannot read metadata of %v", filename)
+			os.Exit(1)
+		}
+		sumSize += fi.Size()
+		maxSize = Max(maxSize, fi.Size())
+	}
+
+	if maxSize > dataSegment {
+		cmd1 := exec.Command("cat", fs...)
+		cmd2 := exec.Command("split", "-C", string(dataSegment), "tempfile" + m.suffix, "map-")
+
+		tempfile := create("tempfile" + m.suffix)
+
+		cmd3 := exec.Command("rm", "tempfile" + m.suffix)
+		defer cmd3.Start()
+		defer tempfile.Close()
+
+		cmd1.Stdout = tempfile
+		err := cmd1.Run()
+		if err != nil {
+			log.Fatalf("run command %v failed", cmd1.Path)
+			os.Exit(1)
+		}
+
+		err = cmd2.Run()
+		if err != nil {
+			log.Fatalf("run command %v failed", cmd2.Path)
+			os.Exit(1)
+		}
+
+		rd := readdir(".")
+
+		for  _, f := range rd {
+			match, _ := regexp.MatchString("map-", f.Name())
+
+			if match == true {
+				os.Rename(f.Name(), fmt.Sprintf("map-%v" + m.suffix, m.nMap))
+				m.nMap++
+			}
+		}
+
+	} else {
+		for _, filename := range fs {
+
+			buffer, err := ioutil.ReadFile(filename)
+
+			if err != nil {
+				log.Fatalf("cannot read file %v", filename)
+			}
+
+			err = ioutil.WriteFile(fmt.Sprintf("map-%v" + m.suffix, m.nMap), buffer, 0777)
+
+			if err != nil {
+				log.Fatalf("cannot write file %v", fmt.Sprintf("map-%v" + m.suffix, m.nMap))
+			}
+
+			m.taskInfo = append(m.taskInfo, TaskInfo {
+				MapNum: m.nMap, ReduceNum: -1, Suffix: m.suffix, 
+				Status: TaskNotAssigned,
+			})
+			m.nMap++
+		}
+	}
+
+	m.nMap--
+}
+
+func (m * Master) InitReduce() {
+	for i := 1; i <= m.nReduce; i++ {
+		m.taskInfo = append(m.taskInfo, TaskInfo {
+			MapNum: -1, ReduceNum: i, Suffix: m.suffix, 
+			Status: TaskNotAssigned,
+		})
+	}
 }

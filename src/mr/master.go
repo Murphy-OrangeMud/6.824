@@ -1,7 +1,9 @@
 package mr
 
+// TODO: modify file readin part and do not part the files.
+
 import (
-	"fmt"
+	//"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -9,7 +11,7 @@ import (
 	"os"
 	"sync"
 	"io/ioutil"
-	"os/exec"
+	//"os/exec"
 	"regexp"
 	"errors"
 	"time"
@@ -91,6 +93,7 @@ func (m *Master) AssignTask(args ExampleArgs, reply *TaskAssign) error {
 			reply.MapNum = task.MapNum
 			reply.ReduceNum = task.ReduceNum
 			reply.Suffix = task.Suffix
+			reply.FileName = task.FileName
 			m.taskInfo[i].Status = TaskRunning
 			m.taskInfo[i].StartTime = time.Now()
 			m.mutex.Unlock()
@@ -258,6 +261,7 @@ func (m * Master) InitMap(files [] string) {
 		}
 	}
 
+	/*
 	const dataSegment = (1 << 26) // 64kb due to the paper
 
 	var sumSize int64
@@ -331,6 +335,15 @@ func (m * Master) InitMap(files [] string) {
 			})
 			m.nMap++
 		}
+	}
+	*/
+	
+	for _, filename := range fs {
+		m.taskInfo = append(m.taskInfo, TaskInfo {
+			FileName: filename, MapNum: m.nMap, ReduceNum: -1, Suffix: m.suffix, 
+			Status: TaskNotAssigned,
+		})
+		m.nMap++
 	}
 
 	m.nMap--

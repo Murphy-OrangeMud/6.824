@@ -50,7 +50,7 @@ func ihash(key string) int {
 }
 
 func (w *Workers) doMapTask(task TaskAssign) {
-	filename := fmt.Sprintf("map-%v", task.MapNum)
+	filename := task.FileName
 	file := open(filename)
 	content := readall(file)
 
@@ -126,7 +126,7 @@ func (w *Workers) doMapTask(task TaskAssign) {
 
 func (w *Workers) doReduceTask(task TaskAssign) {
 	kva := []KeyValue{}
-	for i := 1; i < w.NMap; i++ {
+	for i := 1; i <= w.NMap; i++ {
 		filename := fmt.Sprintf("mr-%v-%v.json", i, task.ReduceNum)
 
 		file := open(filename)

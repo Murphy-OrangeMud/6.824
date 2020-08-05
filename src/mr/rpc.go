@@ -30,12 +30,14 @@ type AliveReply struct {
 }
 
 type TaskAssign struct {
+	FileName string
 	MapNum int
 	ReduceNum int
 	Suffix string
 }
 
 type TaskInfo struct {
+	FileName string
 	MapNum int
 	ReduceNum int
 	Suffix string

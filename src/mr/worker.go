@@ -49,156 +49,140 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-func (w *Workers) doMapTask() {
-	task := TaskAssign{}
-	if call("Master.AssignTask", &ExampleArgs{}, &task) == false {
-		return
-	} else {
-		if task.MapNum > 0 {
-			filename := fmt.Sprintf("map-%v"+task.Suffix, task.MapNum)
-			file := open(filename)
-			content := readall(file)
+func (w *Workers) doMapTask(task TaskAssign) {
+	filename := fmt.Sprintf("map-%v", task.MapNum)
+	file := open(filename)
+	content := readall(file)
 
-			kva := w.mapf(filename, string(content))
+	kva := w.mapf(filename, string(content))
 
-			tempJsonfiles := make(map[string]*os.File)
+	tempJsonfiles := make(map[string]*os.File)
 
-			for i := 1; i <= w.NReduce; i++ {
-				jsonfileName := fmt.Sprintf("mr-%v-%v.json", task.MapNum, i)
+	for i := 1; i <= w.NReduce; i++ {
+		jsonfileName := fmt.Sprintf("mr-%v-%v.json", task.MapNum, i)
 
-				if exist(jsonfileName) {
-					tempJsonfiles[jsonfileName] = nil
-					continue
-				}
+		tempJsonfile := tempfile(".", jsonfileName)
+		defer tempJsonfile.Close()
+		tempJsonfiles[jsonfileName] = tempJsonfile
+	}
 
-				tempJsonfile := tempfile(".", jsonfileName)
-				defer tempJsonfile.Close()
-				tempJsonfiles[jsonfileName] = tempJsonfile
+	encs := make(map[string]*json.Encoder)
+
+	for i := 1; i <= w.NMap; i++ {
+		for j := 1; j <= w.NReduce; j++ {
+			tempjsonfile := tempJsonfiles[fmt.Sprintf("mr-%v-%v.json", i, j)]
+
+			if tempjsonfile == nil {
+				encs[fmt.Sprintf("mr-%v-%v.json", i, j)] = nil
+				continue
 			}
 
-			encs := make(map[string]*json.Encoder)
+			encs[fmt.Sprintf("mr-%v-%v.json", i, j)] = json.NewEncoder(tempjsonfile)
+		}
+	}
 
-			for i := 1; i <= w.NMap; i++ {
-				for j := 1; j <= w.NReduce; j++ {
-					tempjsonfile := tempJsonfiles[fmt.Sprintf("mr-%v-%v.json", i, j)]
+	for _, kv := range kva {
+		reduceNum := ihash(kv.Key) % w.NReduce + 1
+		name := fmt.Sprintf("mr-%v-%v.json", task.MapNum, reduceNum)
+		tempjsonfile := tempJsonfiles[name]
 
-					if tempjsonfile == nil {
-						encs[fmt.Sprintf("mr-%v-%v.json", i, j)] = nil
-						continue
-					}
+		if tempjsonfile == nil {
+			continue
+		}
 
-					encs[fmt.Sprintf("mr-%v-%v.json", i, j)] = json.NewEncoder(tempjsonfile)
-				}
-			}
+		enc := encs[name]
 
-			for _, kv := range kva {
-				reduceNum := ihash(kv.Key)%w.NReduce + 1
-				name := fmt.Sprintf("mr-%v-%v.json", task.MapNum, reduceNum)
-				tempjsonfile := tempJsonfiles[name]
-
-				if tempjsonfile == nil {
-					continue
-				}
-
-				enc := encs[name]
-
-				err := enc.Encode(&kv)
-				if err != nil {
-					log.Fatalf("encode failed in %v", filename)
-					defer exec.Command("rm", tempjsonfile.Name()).Run()
-					defer tempjsonfile.Close()
-
-					call("Master.TaskStatusUpdate", &TaskInfo{
-						MapNum:    task.MapNum,
-						ReduceNum: task.ReduceNum,
-						Status:    TaskFailed,
-						WorkerId:  w.id,
-					}, &ExampleReply{})
-
-					return
-				}
-			}
-
-			for filename, file := range tempJsonfiles {
-				if file == nil {
-					continue
-				}
-				os.Rename(file.Name(), filename)
-			}
+		err := enc.Encode(&kv)
+		if err != nil {
+			log.Fatalf("encode failed in %v", filename)
+			defer exec.Command("rm", tempjsonfile.Name()).Run()
+			defer tempjsonfile.Close()
 
 			call("Master.TaskStatusUpdate", &TaskInfo{
 				MapNum:    task.MapNum,
 				ReduceNum: task.ReduceNum,
-				Status:    TaskCompleted,
+				Status:    TaskNotAssigned,
 				WorkerId:  w.id,
 			}, &ExampleReply{})
+
+			return
 		}
 	}
+
+	for filename, file := range tempJsonfiles {
+		if file == nil {
+			continue
+		}
+		os.Rename(file.Name(), filename)
+	}
+
+	call("Master.TaskStatusUpdate", &TaskInfo{
+		MapNum:    task.MapNum,
+		ReduceNum: task.ReduceNum,
+		Status:    TaskCompleted,
+		WorkerId:  w.id,
+	}, &ExampleReply{})
 }
 
-func (w *Workers) doReduceTask() {
-	task := TaskAssign{}
-	if call("Master.AssignTask", &ExampleArgs{}, &task) == false {
-		return
-	} else {
-		if task.ReduceNum > 0 {
-			kva := []KeyValue{}
-			for i := 1; i < w.NMap; i++ {
-				filename := fmt.Sprintf("mr-%v-%v.json", i, task.ReduceNum)
+func (w *Workers) doReduceTask(task TaskAssign) {
+	kva := []KeyValue{}
+	for i := 1; i < w.NMap; i++ {
+		filename := fmt.Sprintf("mr-%v-%v.json", i, task.ReduceNum)
 
-				file := open(filename)
+		file := open(filename)
 
-				dec := json.NewDecoder(file)
+		dec := json.NewDecoder(file)
 
-				for {
-					var kv KeyValue
-					if err := dec.Decode(&kv); err != nil {
-						break
-					}
-					kva = append(kva, kv)
-				}
+		for {
+			var kv KeyValue
+			if err := dec.Decode(&kv); err != nil {
+				break
 			}
-
-			sort.Sort(ByKey(kva))
-
-			reduceName := fmt.Sprintf("mr-out-%v", task.ReduceNum)
-			reduceFile := create(reduceName)
-
-			i := 0
-			for i < len(kva) {
-				j := i + 1
-				for j < len(kva) && kva[j].Key == kva[i].Key {
-					j++
-				}
-				values := []string{}
-
-				for k := i; k < j; k++ {
-					values = append(values, kva[k].Value)
-				}
-				output := w.reducef(kva[i].Key, values)
-				fmt.Fprintf(reduceFile, "%v %v\n", kva[i].Key, output)
-				i = j
-			}
-
-			call("Master.TaskStatusUpdate", &TaskInfo{
-				MapNum:    task.MapNum,
-				ReduceNum: task.ReduceNum,
-				Status:    TaskCompleted,
-				WorkerId:  w.id,
-			}, &ExampleReply{})
+			kva = append(kva, kv)
 		}
 	}
+
+	sort.Sort(ByKey(kva))
+
+	//reduceName := //fmt.Sprintf("mr-out-%v" + task.Suffix, task.ReduceNum)
+	reduceName := fmt.Sprintf("mr-out-%v", task.ReduceNum)
+	reduceFile := create(reduceName)
+
+	i := 0
+	for i < len(kva) {
+		j := i + 1
+		for j < len(kva) && kva[j].Key == kva[i].Key {
+			j++
+		}
+		values := []string{}
+
+		for k := i; k < j; k++ {
+			values = append(values, kva[k].Value)
+		}
+		output := w.reducef(kva[i].Key, values)
+		fmt.Fprintf(reduceFile, "%v %v\n", kva[i].Key, output)
+		i = j
+	}
+
+	call("Master.TaskStatusUpdate", &TaskInfo{
+		MapNum:    task.MapNum,
+		ReduceNum: task.ReduceNum,
+		Status:    TaskCompleted,
+		WorkerId:  w.id,
+	}, &ExampleReply{})
 }
 
 func (w *Workers) doTask() error {
 	task := TaskAssign{}
-	if call("Master.AssignTask", &ExampleArgs{}, &task) == false {
-		isFinished()
+	if call("Master.AssignTask", ExampleArgs{w.id}, &task) == false {
+		w.isFinished()
 	} else {
 		if task.MapNum != -1 {
-			w.doMapTask()
+			w.doMapTask(task)
 		} else if task.ReduceNum != -1 {
-			w.doReduceTask()
+			w.doReduceTask(task)
+		} else {
+			w.isFinished()
 		}
 	}
 	return nil
@@ -215,9 +199,9 @@ func Worker(mapf func(string, string) []KeyValue,
 		reducef: reducef,
 	}
 
-	call("Master.InitWorker", &w, &ExampleReply{})
+	call("Master.InitWorker", &w, &w)
 
-	r := AliveReply{false}
+	r := AliveReply{IsAlive: false}
 	call("Master.IsAlive", &ExampleArgs{}, &r)
 
 	for r.IsAlive {
@@ -227,12 +211,10 @@ func Worker(mapf func(string, string) []KeyValue,
 	}
 }
 
-func isFinished() {
-	task := AliveReply{false}
+func (w *Workers) isFinished() {
+	reply := AliveReply{IsAlive: false}
 
-	call("Master.IsAlive", &ExampleArgs{}, &task)
-
-	if task.IsAlive == false {
+	if call("Master.IsAlive", &ExampleArgs{}, &reply) == false || reply.IsAlive == false {
 		os.Exit(0)
 	}
 }

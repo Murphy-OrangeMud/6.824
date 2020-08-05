@@ -16,15 +16,16 @@ import (
 )
 
 type Master struct {
-	// Your definitions here.
 	mutex sync.Mutex
 	completedTask int
+	reduceInit bool
 	nReduce int
 	nMap int
 	workerNum int
 	done bool
 	suffix string
 	taskInfo []TaskInfo
+	aliveworkers int
 }
 
 const (
@@ -52,28 +53,38 @@ func (m *Master) schedule() {
 				break
 			}
 			case TaskRunning: {
-				if curTime.Sub(task.StartTime) > 1e10 {
-					m.taskInfo[i].Status = TaskFailed
+				if int(curTime.Sub(task.StartTime).Seconds()) > 30 {
+					m.taskInfo[i].Status = TaskNotAssigned
+					m.aliveworkers--
 					m.mutex.Unlock()
 					break
 				}
+				m.mutex.Unlock()
+				break
 			}
-			case TaskNotAssigned:
-			case TaskCompleted:
+			case TaskNotAssigned: { 
+				m.mutex.Unlock() 
+				break
+			}
+			case TaskCompleted: {
+				m.mutex.Unlock() 
+				break
+			}
 			}
 		}
-		if m.completedTask == m.nMap  {
+		if m.completedTask == m.nMap && !m.reduceInit {
 			m.mutex.Lock()
+			m.reduceInit = true
 			m.InitReduce()
 			m.mutex.Unlock()
 		} else if m.completedTask ==  m.nMap + m.nReduce {
 			m.done = true
 		}
-		time.Sleep(1e8)
+		time.Sleep(1e10)
 	}
 }
 
-func (m *Master) AssignTask(args *ExampleArgs, reply *TaskAssign) error {
+func (m *Master) AssignTask(args ExampleArgs, reply *TaskAssign) error {
 	for i, task := range m.taskInfo {
 		m.mutex.Lock()
 		if task.Status == TaskNotAssigned {
@@ -81,12 +92,15 @@ func (m *Master) AssignTask(args *ExampleArgs, reply *TaskAssign) error {
 			reply.ReduceNum = task.ReduceNum
 			reply.Suffix = task.Suffix
 			m.taskInfo[i].Status = TaskRunning
+			m.taskInfo[i].StartTime = time.Now()
 			m.mutex.Unlock()
 			return nil
 		}
 		m.mutex.Unlock()
 	}
-	return errors.New("No task to assign temporarily")
+	reply.MapNum = -1
+	reply.ReduceNum = -1
+	return nil
 }
 
 func (m *Master) TaskStatusUpdate(args *TaskInfo, reply *ExampleReply) error {
@@ -111,11 +125,12 @@ func (m *Master) TaskStatusUpdate(args *TaskInfo, reply *ExampleReply) error {
 	return errors.New("Inexist task!\n")
 }
 
-func (m *Master) InitWorker(args *Workers, reply *ExampleReply) error {
-	args.NMap = m.nMap
-	args.NReduce = m.nReduce
-	args.id = m.workerNum
+func (m *Master) InitWorker(args *Workers, reply *Workers) error {
+	reply.NMap = m.nMap
+	reply.NReduce = m.nReduce
+	reply.id = m.workerNum
 	m.workerNum++
+	m.aliveworkers++
 	return nil
 }
 
@@ -150,6 +165,7 @@ func (m *Master) Done() bool {
 //
 func MakeMaster(files []string, nReduce int) *Master {
 	m := Master{
+		reduceInit: false,
 		mutex: sync.Mutex{}, 
 		completedTask: 0, 
 		nReduce: nReduce, 
@@ -161,6 +177,8 @@ func MakeMaster(files []string, nReduce int) *Master {
 	}
 
 	m.InitMap(files)
+
+	//fmt.Printf("nmap: %v, nreduce: %v\n", m.nMap, m.nReduce)
 
 	go m.schedule()
 	m.server()
@@ -300,10 +318,11 @@ func (m * Master) InitMap(files [] string) {
 				log.Fatalf("cannot read file %v", filename)
 			}
 
-			err = ioutil.WriteFile(fmt.Sprintf("map-%v" + m.suffix, m.nMap), buffer, 0777)
+			// err = ioutil.WriteFile(fmt.Sprintf("map-%v" + m.suffix, m.nMap), buffer, 0777)
+			err = ioutil.WriteFile(fmt.Sprintf("map-%v", m.nMap), buffer, 0777)
 
 			if err != nil {
-				log.Fatalf("cannot write file %v", fmt.Sprintf("map-%v" + m.suffix, m.nMap))
+				log.Fatalf("cannot write file %v", fmt.Sprintf("map-%v", m.nMap))
 			}
 
 			m.taskInfo = append(m.taskInfo, TaskInfo {

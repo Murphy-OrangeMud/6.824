@@ -22,7 +22,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
+	"fmt"
 	"../labrpc"
 )
 
@@ -115,7 +115,13 @@ func (rf *Raft) GetState() (int, bool) {
 
 	rf.mu.Lock()
 	term = rf.currentTerm
-	isleader = (rf.currentState == Leader)
+	
+	if rf.currentState == Leader {
+		isleader = true
+	} else {
+		isleader = false
+	}
+
 	rf.mu.Unlock()
 
 	return term, isleader
@@ -186,6 +192,7 @@ type RequestVoteReply struct {
 // example RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+	// fmt.Printf("server %v is now requesting vote from server %v\n", args.RequestCandidateID, rf.me)
 	// Your code here (2A, 2B).
 	if args.RequestCandidateTerm < rf.currentTerm {
 		reply.PeerTerm = rf.currentTerm
@@ -198,6 +205,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 					len(rf.logs) >= args.LastLogIndex+1) {
 				reply.VoteGranted = true
 				rf.votedFor = args.RequestCandidateID
+				/*
+				if (rf.votedFor != -1) {
+					fmt.Printf("server %v voted for server %v\n", rf.me, rf.votedFor)
+				}
+				*/
 				if args.RequestCandidateTerm > rf.currentTerm {
 					rf.currentState = Follower
 					rf.currentTerm = args.RequestCandidateTerm
@@ -309,11 +321,18 @@ func (rf *Raft) sendAppendEntries(serverID int, args *AppendEntriesArgs, reply *
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
-	isLeader := (rf.currentState == Leader)
+	
+	var isLeader bool
+	if rf.currentState == Leader {
+		isLeader = true
+	} else {
+		isLeader = false
+	}
 
 	// Your code here (2B).
 
 	if isLeader {
+		fmt.Printf("Yeah, I'm leader")
 		term = rf.currentTerm
 		index = len(rf.logs)
 
@@ -458,6 +477,17 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.currentVotes = 0
 	rf.currentLeaderID = -1
 
+	rf.commitIndex = -1
+	rf.lastApplied = -1
+
+	rf.matchIndex = []int{}
+	rf.nextIndex = []int{}
+
+	for i := 0; i < len(rf.peers); i++ {
+		rf.matchIndex = append(rf.matchIndex, -1)
+		rf.nextIndex = append(rf.nextIndex, 0)
+	}
+
 	rf.logs = []Log{}
 
 	// initialize from state persisted before a crash
@@ -476,6 +506,7 @@ func (rf *Raft) run() {
 		if rf.currentState == Follower && int(currentTime.Sub(rf.lastHeartbeatTime).Milliseconds()) > rf.electionTimeout {
 			rf.lastHeartbeatTime = time.Now()
 			rf.elect()
+			fmt.Printf("Term %v: server %v ended election with state %v\n", rf.currentTerm, rf.me, rf.currentState)
 			if rf.currentState == Leader {
 				rf.leader()
 			}
@@ -492,12 +523,13 @@ func (rf *Raft) applyCommit() {
 				Command:      rf.logs[i].Command,
 				CommandIndex: i,}
 		}
-		rf.lastApplied = commitIndex
+		rf.lastApplied = rf.commitIndex
 	}
 }
 
 
 func (rf *Raft) elect() {
+	fmt.Printf("server %v begins election...\n", rf.me)
 	rf.currentState = Candidate
 	rf.currentVotes = 1
 	rf.currentTerm++
@@ -506,7 +538,7 @@ func (rf *Raft) elect() {
 			if i == rf.me {
 				continue
 			}
-			requestVoteReply := RequestVoteReply{
+			reply := RequestVoteReply{
 				PeerTerm:    -1,
 				VoteGranted: false,
 			}
@@ -521,21 +553,22 @@ func (rf *Raft) elect() {
 			} else {
 				args.LastLogTerm = rf.logs[args.LastLogIndex].LogTerm
 			}
-			reply := RequestVoteReply{}
+
 			if rf.sendRequestVote(i, &args, &reply) == false {
 				continue // to be revised in fault tolerance
 			}
 
-			if requestVoteReply.VoteGranted == true {
+			if reply.VoteGranted == true {
+				fmt.Printf("server %v now has %v votes\n", rf.me, rf.currentVotes)
 				rf.currentVotes++
 				if rf.currentVotes > len(rf.peers)/2 {
 					rf.currentState = Leader
 					return
 				}
 			} else {
-				if requestVoteReply.PeerTerm > rf.currentTerm {
+				if reply.PeerTerm > rf.currentTerm {
 					rf.currentState = Follower
-					rf.currentTerm = requestVoteReply.PeerTerm
+					rf.currentTerm = reply.PeerTerm
 					return
 				}
 			}

@@ -443,6 +443,8 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			cfg.mu.Unlock()
 			if rf != nil {
 				index1, _, ok := rf.Start(cmd)
+				// test
+				fmt.Printf("ok = %v, index1 = %v\n", ok, index1)
 				if ok {
 					index = index1
 					break
@@ -456,6 +458,8 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
 				nd, cmd1 := cfg.nCommitted(index)
+				//test
+				fmt.Printf("%v servers have thought the command %v has been committed, and the newly submitted command is %v\n", nd, cmd1, cmd)
 				if nd > 0 && nd >= expectedServers {
 					// committed
 					if cmd1 == cmd {

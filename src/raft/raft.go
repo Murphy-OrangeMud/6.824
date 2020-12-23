@@ -95,12 +95,8 @@ func (rf *Raft) GetState() (int, bool) {
 	var isleader bool
 	// Your code here (2A).
 	
-	// rf.mu.Lock()
 	term = rf.currentTerm
 	isleader = (rf.state == Leader)
-	// for debug
-	fmt.Printf("Server %d is now state %d with term %d\n", rf.me, rf.state, rf.currentTerm)
-	// rf.mu.Unlock()
 
 	return term, isleader
 }
@@ -204,9 +200,6 @@ type RequestVoteReply struct {
 //
 // rf: callee, requestVoteArgs: caller
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	// for debug
-	fmt.Printf("Server %d is requesting vote from server %d\n", args.ID, rf.me)
-
 	// Your code here (2A, 2B).
 	if args.CurrentTerm < rf.currentTerm {
 		reply.CurrentTerm = rf.currentTerm
@@ -251,8 +244,6 @@ type AppendEntriesReply struct {
 
 // rf: callee args: leader
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	// for debug
-	//fmt.Printf("Server %d is sending heartbeat to server %d\n", args.ID, rf.me)
 	reply.CurrentTerm = -1
 
 	if args.CurrentTerm < rf.currentTerm {
@@ -332,21 +323,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	// for debug
-	if ok == false {
-		// fmt.Printf("sendRequestVote from server %d to server %d failed\n", rf.me, server)
-	}
-
 	return ok
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
-	// for debug
-	if ok == false {
-		//fmt.Printf("sendAppendEntries from server %d to server %d failed\n", rf.me, server)
-	}
-
 	return ok
 }
 
@@ -385,8 +366,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		})
 		return index, term, isLeader
 	}
-
-	return index, term, isLeader
 }
 
 //
@@ -498,9 +477,6 @@ func (rf *Raft) run() {
 }
 
 func (rf *Raft) elect() {
-	// for debug
-	fmt.Printf("Server %d begins election with term %d\n", rf.me, rf.currentTerm + 1)
-
 	rf.mu.Lock()
 	rf.currentTerm++
 	rf.state = Candidate
@@ -517,8 +493,6 @@ func (rf *Raft) elect() {
 			rf.voteCandidate = -1
 			rf.getVotes = 0
 			rf.mu.Unlock()
-			// for debug
-			fmt.Printf("Server %d is now follower with term %d\n", rf.me, rf.currentTerm)
 			return
 		}
 
@@ -527,6 +501,7 @@ func (rf *Raft) elect() {
 			if i == rf.me {
 				continue
 			}
+
 			args := RequestVoteArgs {
 				rf.currentTerm,
 				rf.logs,
@@ -548,8 +523,6 @@ func (rf *Raft) elect() {
 				rf.getVotes = 0
 				rf.currentTerm = reply.CurrentTerm
 				rf.mu.Unlock()
-				// for debug
-				fmt.Printf("Server %d is now follower with term %d\n", rf.me, rf.currentTerm)
 				return
 			} else if reply.ReturnValue == -4 {
 				rf.mu.Lock()
@@ -557,20 +530,13 @@ func (rf *Raft) elect() {
 				rf.voteCandidate = -1
 				rf.getVotes = 0
 				rf.mu.Unlock()
-				// for debug
-				fmt.Printf("Server %d is now follower with term %d\n", rf.me, rf.currentTerm)
 				return
 			}
-
-			// for debug
-			fmt.Printf("Server %d has now got %d votes with return value %d\n", rf.me, rf.getVotes, reply.ReturnValue)
 
 			if rf.getVotes > len(rf.peers) / 2 {
 				rf.mu.Lock()
 				rf.state = Leader
 				rf.mu.Unlock()
-				// for debug
-				fmt.Printf("Server %d is now leader with term %d\n", rf.me, rf.currentTerm)
 				return
 			}
 		}
@@ -607,12 +573,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = Follower
 	rf.nextIndex = []int{0, 0, 0, 0, 0}
 	rf.getVotes = 0
-	rf.heartbeatInterval = 3 // ms
+	rf.heartbeatInterval = 100 // ms
 	rf.applyCh = applyCh
 	rf.mu.Unlock()
 
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
-	rf.electionTimeout = r.Intn(290) + 10 //ms
+	rf.electionTimeout = r.Intn(200) + 300 //ms
 
 	// initialize from state persisted before a crash
 	rf.readPersist(rf.persister.ReadRaftState())

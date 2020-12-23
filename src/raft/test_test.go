@@ -60,7 +60,7 @@ func TestReElection2A(t *testing.T) {
 	leader1 := cfg.checkOneLeader()
 
 	// for debug
-	fmt.Printf("Test 0 passed\n")
+	fmt.Printf("Test 0 passed with leader %d\n", leader1)
 
 	// if the leader disconnects, a new one should be elected.
 	cfg.disconnect(leader1)
@@ -75,7 +75,7 @@ func TestReElection2A(t *testing.T) {
 	leader2 := cfg.checkOneLeader()
 
 	// for debug
-	fmt.Printf("Test 2 passed\n")
+	fmt.Printf("Test 2 passed with leader %d\n", leader2)
 
 	// if there's no quorum, no leader should
 	// be elected.

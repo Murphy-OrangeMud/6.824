@@ -285,45 +285,45 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// fmt.Printf("Server %d is sending append entry to server %d\n", args.ID, rf.me)
 
 		// lab 2b
-		if args.NextIndex > 0 && args.NextIndex <= len(rf.logs) {
-			if !(rf.logs[args.NextIndex - 1].Index == args.Logs[args.NextIndex - 1].Index && rf.logs[args.NextIndex - 1].Term == args.Logs[args.NextIndex - 1].Term) {
+		if args.NextIndex > 1 && args.NextIndex <= len(rf.logs) + 1 {
+			if !(rf.logs[args.NextIndex - 2].Index == args.Logs[args.NextIndex - 2].Index && rf.logs[args.NextIndex - 2].Term == args.Logs[args.NextIndex - 2].Term) {
 				// will optimize here
 				reply.NextIndex = args.NextIndex - 1
 				reply.ReturnValue = -1
 			} else {
-				rf.logs = rf.logs[:args.NextIndex]
-				for i := args.NextIndex; i < len(args.Logs); i++ {
+				rf.logs = rf.logs[:args.NextIndex - 1]
+				for i := args.NextIndex - 1; i < len(args.Logs); i++ {
 					rf.logs = append(rf.logs, args.Logs[i])
 				}
-				reply.NextIndex = len(args.Logs)
+				reply.NextIndex = len(args.Logs) + 1
 				reply.ReturnValue = 1
 			}
-		} else if args.NextIndex > len(rf.logs) {
-			reply.NextIndex = len(rf.logs)
+		} else if args.NextIndex > len(rf.logs) + 1 {
+			reply.NextIndex = len(rf.logs) + 1
 			reply.ReturnValue = -1
 		} else {
-			// args.NextIndex == 0
+			// args.NextIndex == 1
 			if len(args.Logs) > 0 {
 				for i := 0; i < len(args.Logs); i++ {
 					rf.logs = append(rf.logs, args.Logs[i])
 				}
-				reply.NextIndex = len(args.Logs)
+				reply.NextIndex = len(args.Logs) + 1
 				reply.ReturnValue = 1
 			}
 		}
 
 		if reply.ReturnValue == 1 && args.LeaderCommitIndex > rf.commitIndex {
-			if args.LeaderCommitIndex < len(args.Logs) - 1 {
+			if args.LeaderCommitIndex < len(args.Logs) {
 				rf.commitIndex = args.LeaderCommitIndex
 			} else {
-				rf.commitIndex = len(args.Logs) - 1
+				rf.commitIndex = len(args.Logs)
 			}
 		}
 	}
 	// for debug
-	fmt.Println(rf.me, reply.NextIndex, reply.ReturnValue)
-	fmt.Printf("After Appending Entries, server %d's log: ", rf.me)
-	fmt.Println(rf.logs)
+	//fmt.Println(rf.me, reply.NextIndex, reply.ReturnValue)
+	//fmt.Printf("After Appending Entries, server %d's log: ", rf.me)
+	//fmt.Println(rf.logs)
 }
 
 //
@@ -386,16 +386,16 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	// Your code here (2B).
 
-	isLeader = (rf.state == Leader)
+	isLeader = (rf.state == Leader) && (!rf.killed())
 	term = rf.currentTerm
-	index = len(rf.logs)
+	index = len(rf.logs) + 1
 
 	if isLeader == false {
 		return index, term, isLeader
 	} else {
-		rf.logs = append(rf.logs, Log{ Command: command, Index: len(rf.logs), Term: rf.currentTerm })
+		rf.logs = append(rf.logs, Log{ Command: command, Index: len(rf.logs) + 1, Term: rf.currentTerm })
 		// for debug
-		fmt.Println(rf.logs)
+		// fmt.Println(rf.logs)
 
 		return index, term, isLeader
 	}
@@ -444,8 +444,8 @@ func (rf *Raft) commit() {
 	// reinitialize after election
 	rf.mu.Lock()
 	for i, _ := range rf.peers {
-		rf.nextIndex[i] = len(rf.logs)
-		rf.matchIndex[i] = -1
+		rf.nextIndex[i] = len(rf.logs) + 1
+		rf.matchIndex[i] = 0
 	}
 	rf.mu.Unlock()
 	for {
@@ -459,7 +459,8 @@ func (rf *Raft) commit() {
 			reply AppendEntriesReply
 		}
 		commitResultChan := make(chan CommitResult)
-		fmt.Println(rf.me, rf.logs)
+		// for debug
+		//fmt.Println(rf.me, rf.logs)
 		for i, _ := range rf.peers {
 			go func (id int) {
 				if id == rf.me {
@@ -524,8 +525,8 @@ func (rf *Raft) commit() {
 		sort.Sort(sortMatchIndex)
 
 		// for debug
-		fmt.Println(rf.nextIndex)
-		fmt.Println(sortMatchIndex)
+		//fmt.Println(rf.nextIndex)
+		//fmt.Println(sortMatchIndex)
 		// fmt.Println(sortMatchIndex)
 
 		rf.commitIndex = sortMatchIndex[len(rf.peers) / 2].index
@@ -701,12 +702,13 @@ func (rf *Raft) applyLog() {
 	for !rf.killed() {
 		time.Sleep(time.Millisecond * 1)
 		if rf.commitIndex > rf.lastApplied {
-			fmt.Println(rf.me, rf.state, rf.commitIndex, rf.lastApplied)
+			// for debug
+			//fmt.Println(rf.me, rf.state, rf.commitIndex, rf.lastApplied)
 			rf.lastApplied++
 			rf.applyCh <- ApplyMsg {
 				CommandValid: true,
-				Command: rf.logs[rf.lastApplied].Command,
-				CommandIndex: rf.logs[rf.lastApplied].Index,
+				Command: rf.logs[rf.lastApplied - 1].Command,
+				CommandIndex: rf.logs[rf.lastApplied - 1].Index,
 			}
 		}
 	}
@@ -742,12 +744,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.getVotes = 0
 	rf.heartbeatInterval = 100 // ms
 	rf.applyCh = applyCh
-	rf.lastApplied = -1
-	rf.commitIndex = -1
+	rf.lastApplied = 0
+	rf.commitIndex = 0
 	
 	for i := 0; i < len(rf.peers); i++ {
-		rf.nextIndex = append(rf.nextIndex, 0)
-		rf.matchIndex = append(rf.matchIndex, -1)
+		rf.nextIndex = append(rf.nextIndex, 1)
+		rf.matchIndex = append(rf.matchIndex, 0)
 	}
 	//rf.mu.Unlock()
 

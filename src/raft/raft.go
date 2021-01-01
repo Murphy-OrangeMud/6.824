@@ -532,7 +532,7 @@ func (rf *Raft) commit() {
 			}
 			sortMatchIndex = append(sortMatchIndex, mIndex { id: i, index: rf.matchIndex[i] })
 		}
-		sortMatchIndex = append(sortMatchIndex, mIndex { id: rf.me, index: len(rf.logs) })
+		//sortMatchIndex = append(sortMatchIndex, mIndex { id: rf.me, index: len(rf.logs) })
 		sort.Sort(sortMatchIndex)
 
 		// for debug

@@ -284,18 +284,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 		// lab 2b
 		if args.NextIndex > 1 && args.NextIndex <= len(rf.logs) + 1 {
-			if !(rf.logs[args.NextIndex - 2].Index == args.Logs[args.NextIndex - 2].Index && rf.logs[args.NextIndex - 2].Term == args.Logs[args.NextIndex - 2].Term) {
-				// will optimize here
-				reply.NextIndex = args.NextIndex - 1
-				reply.ReturnValue = -1
-			} else {
-				rf.logs = rf.logs[:args.NextIndex - 1]
-				for i := args.NextIndex - 1; i < len(args.Logs); i++ {
-					rf.logs = append(rf.logs, args.Logs[i])
-				}
-				reply.NextIndex = len(args.Logs) + 1
-				reply.ReturnValue = 1
+			nextIdx := args.NextIndex
+			for nextIdx >= 2 && !(rf.logs[nextIdx - 2].Index == args.Logs[nextIdx - 2].Index && rf.logs[nextIdx - 2].Term == args.Logs[nextIdx - 2].Term) {
+				nextIdx -= 1
 			}
+			rf.logs = rf.logs[:nextIdx - 1]
+			for i := nextIdx - 1; i < len(args.Logs); i++ {
+				rf.logs = append(rf.logs, args.Logs[i])
+			}
+			reply.NextIndex = len(args.Logs) + 1
+			reply.ReturnValue = 1
 		} else if args.NextIndex > len(rf.logs) + 1 {
 			reply.NextIndex = len(rf.logs) + 1
 			reply.ReturnValue = -1
@@ -457,7 +455,7 @@ func (rf *Raft) commit() {
 	}
 	rf.mu.Unlock()
 	for {
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(1 * time.Millisecond)
 		if rf.killed() || rf.state != Leader {
 			return
 		}
@@ -519,7 +517,7 @@ func (rf *Raft) commit() {
 					rf.matchIndex[commitResult.id] = rf.nextIndex[commitResult.id] - 1
 					rf.mu.Unlock()
 				}
-			case <- time.After(((time.Duration) (rf.electionTimeout)) * time.Millisecond):
+			case <- time.After(((time.Duration) (rf.electionTimeout / 10)) * time.Millisecond):
 				finishCount++
 				break
 			}
@@ -532,12 +530,7 @@ func (rf *Raft) commit() {
 			}
 			sortMatchIndex = append(sortMatchIndex, mIndex { id: i, index: rf.matchIndex[i] })
 		}
-		//sortMatchIndex = append(sortMatchIndex, mIndex { id: rf.me, index: len(rf.logs) })
 		sort.Sort(sortMatchIndex)
-
-		// for debug
-		//fmt.Println(rf.nextIndex)
-		//fmt.Println(sortMatchIndex)
 
 		rf.applyCond.L.Lock()
 		rf.commitIndex = sortMatchIndex[len(rf.peers) / 2 - 1].index // and leader
@@ -609,7 +602,7 @@ func (rf *Raft) run() {
 				}
 			}
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(1 * time.Millisecond)
 		if rf.killed() {
 			return
 		}

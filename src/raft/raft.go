@@ -164,20 +164,23 @@ func (rf *Raft) readPersist(data []byte) {
 	var logs []Log
 	var voteCandidate int
 
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	if d.Decode(&currentTerm) != nil {
-		fmt.Print("Decode failed: currentTerm")
+		fmt.Println("Decode failed: currentTerm")
 	} else {
 		rf.currentTerm = currentTerm
 	}
 
 	if d.Decode(&logs) != nil {
-		fmt.Print("Decode failed: logs")
+		fmt.Println("Decode failed: logs")
 	} else {
 		rf.logs = logs
 	}
 
 	if d.Decode(&voteCandidate) != nil {
-		fmt.Print("Decode failed: voteCandidate")
+		fmt.Println("Decode failed: voteCandidate")
 	} else {
 		rf.voteCandidate = voteCandidate
 	}
@@ -234,6 +237,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	} else {
 		// go func() { rf.timeout.InElection <- 2; } ()
 		rf.voteCandidate = args.ID
+		rf.persist()
 		reply.ReturnValue = 1
 		return
 	}
@@ -266,6 +270,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if rf.currentTerm < args.CurrentTerm {
 			rf.mu.Lock()
 			rf.currentTerm = args.CurrentTerm
+			rf.persist()
 			rf.mu.Unlock()
 		}
 		if rf.state == Candidate || rf.state == Leader {
@@ -273,6 +278,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.state = Follower
 			rf.voteCandidate = -1
 			rf.getVotes = 0
+			rf.persist()
 			rf.mu.Unlock()
 		}
 
@@ -292,6 +298,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			for i := nextIdx - 1; i < len(args.Logs); i++ {
 				rf.logs = append(rf.logs, args.Logs[i])
 			}
+			rf.persist()
 			reply.NextIndex = len(args.Logs) + 1
 			reply.ReturnValue = 1
 		} else if args.NextIndex > len(rf.logs) + 1 {
@@ -303,6 +310,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				for i := 0; i < len(args.Logs); i++ {
 					rf.logs = append(rf.logs, args.Logs[i])
 				}
+				rf.persist()
 				reply.NextIndex = len(args.Logs) + 1
 				reply.ReturnValue = 1
 			}
@@ -395,7 +403,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	if isLeader == false {
 		return index, term, isLeader
 	} else {
+		rf.mu.Lock()
 		rf.logs = append(rf.logs, Log{ Command: command, Index: len(rf.logs) + 1, Term: rf.currentTerm })
+		rf.persist()
+		rf.mu.Unlock()
 		// for debug
 		//fmt.Printf("Leader: %v, ", rf.me)
 		//fmt.Println(rf.logs)
@@ -465,8 +476,7 @@ func (rf *Raft) commit() {
 			reply AppendEntriesReply
 		}
 		commitResultChan := make(chan CommitResult)
-		// for debug
-		//fmt.Println(rf.me, rf.logs)
+
 		for i, _ := range rf.peers {
 			go func (id int) {
 				if id == rf.me {
@@ -505,6 +515,7 @@ func (rf *Raft) commit() {
 					if commitResult.reply.CurrentTerm != -1 {
 						rf.mu.Lock()
 						rf.currentTerm = commitResult.reply.CurrentTerm
+						rf.persist()
 						rf.state = Follower
 						rf.mu.Unlock()
 						return
@@ -560,6 +571,7 @@ func (rf *Raft) run() {
 				rf.mu.Lock()
 				rf.voteCandidate = -1
 				rf.getVotes = 0
+				rf.persist()
 				rf.mu.Unlock()
 			}
 		case Leader:
@@ -593,6 +605,7 @@ func (rf *Raft) run() {
 							rf.currentTerm = reply.CurrentTerm
 							rf.getVotes = 0
 							rf.voteCandidate = -1
+							rf.persist()
 							rf.mu.Unlock()
 							return
 						}
@@ -615,6 +628,7 @@ func (rf *Raft) elect() {
 	rf.state = Candidate
 	rf.getVotes = 1
 	rf.voteCandidate = rf.me
+	rf.persist()
 	rf.mu.Unlock()
 
 	go func() { rf.timeout.InElection <- 2; } ()
@@ -666,6 +680,7 @@ func (rf *Raft) elect() {
 							rf.state = Leader
 							rf.voteCandidate = -1
 							rf.getVotes = 0
+							rf.persist()
 							rf.mu.Unlock()
 							return
 						}
@@ -675,6 +690,7 @@ func (rf *Raft) elect() {
 						rf.voteCandidate = -1
 						rf.getVotes = 0
 						rf.currentTerm = result.reply.CurrentTerm
+						rf.persist()
 						rf.mu.Unlock()
 						return
 					} else if result.reply.ReturnValue == -4 {
@@ -682,6 +698,7 @@ func (rf *Raft) elect() {
 						rf.state = Follower
 						rf.voteCandidate = -1
 						rf.getVotes = 0
+						rf.persist()
 						rf.mu.Unlock()
 						return
 					}
@@ -690,6 +707,7 @@ func (rf *Raft) elect() {
 					rf.state = Follower
 					rf.voteCandidate = -1
 					rf.getVotes = 0
+					rf.persist()
 					rf.mu.Unlock()
 					return
 				}
@@ -699,6 +717,7 @@ func (rf *Raft) elect() {
 			rf.state = Follower
 			rf.voteCandidate = -1
 			rf.getVotes = 0
+			rf.persist()
 			rf.mu.Unlock()
 			return
 		}

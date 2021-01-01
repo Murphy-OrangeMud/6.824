@@ -96,6 +96,7 @@ type Raft struct {
 	lastApplied int
 
 	timeout TimeOut
+	applyCond *sync.Cond
 }
 
 // return currentTerm and whether this server
@@ -281,9 +282,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			return
 		}
 
-		// for debug
-		// fmt.Printf("Server %d is sending append entry to server %d\n", args.ID, rf.me)
-
 		// lab 2b
 		if args.NextIndex > 1 && args.NextIndex <= len(rf.logs) + 1 {
 			if !(rf.logs[args.NextIndex - 2].Index == args.Logs[args.NextIndex - 2].Index && rf.logs[args.NextIndex - 2].Term == args.Logs[args.NextIndex - 2].Term) {
@@ -314,15 +312,21 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 		if reply.ReturnValue == 1 && args.LeaderCommitIndex > rf.commitIndex {
 			if args.LeaderCommitIndex < len(args.Logs) {
+				rf.applyCond.L.Lock()
 				rf.commitIndex = args.LeaderCommitIndex
+				rf.applyCond.Broadcast()
+				rf.applyCond.L.Unlock()
 			} else {
+				rf.applyCond.L.Lock()
 				rf.commitIndex = len(args.Logs)
+				rf.applyCond.Broadcast()
+				rf.applyCond.L.Unlock()
 			}
 		}
 	}
 	// for debug
 	//fmt.Println(rf.me, reply.NextIndex, reply.ReturnValue)
-	//fmt.Printf("After Appending Entries, server %d's log: ", rf.me)
+	//fmt.Printf("After Appending Entries, server %d's commitindex %d, applyindex %d, log: ", rf.me, rf.commitIndex, rf.lastApplied)
 	//fmt.Println(rf.logs)
 }
 
@@ -395,7 +399,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	} else {
 		rf.logs = append(rf.logs, Log{ Command: command, Index: len(rf.logs) + 1, Term: rf.currentTerm })
 		// for debug
-		// fmt.Println(rf.logs)
+		//fmt.Printf("Leader: %v, ", rf.me)
+		//fmt.Println(rf.logs)
 
 		return index, term, isLeader
 	}
@@ -441,6 +446,9 @@ func (idx mIndices) Swap(i, j int) {
 }
 
 func (rf *Raft) commit() {
+	if rf.killed() || rf.state != Leader {
+		return
+	}
 	// reinitialize after election
 	rf.mu.Lock()
 	for i, _ := range rf.peers {
@@ -449,7 +457,7 @@ func (rf *Raft) commit() {
 	}
 	rf.mu.Unlock()
 	for {
-		time.Sleep(1 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 		if rf.killed() || rf.state != Leader {
 			return
 		}
@@ -486,9 +494,6 @@ func (rf *Raft) commit() {
 			} (i)
 		}
 
-		// for debug
-		// fmt.Printf("Server %d finished sending append entries\n", rf.me)
-
 		finishCount := 0
 		for finishCount < len(rf.peers) - 1 && rf.state == Leader {
 			select {
@@ -509,9 +514,14 @@ func (rf *Raft) commit() {
 						rf.nextIndex[commitResult.id] = commitResult.reply.NextIndex
 					}
 				} else if commitResult.reply.ReturnValue == 1 {
+					rf.mu.Lock()
 					rf.nextIndex[commitResult.id] = commitResult.reply.NextIndex
 					rf.matchIndex[commitResult.id] = rf.nextIndex[commitResult.id] - 1
+					rf.mu.Unlock()
 				}
+			case <- time.After(((time.Duration) (rf.electionTimeout)) * time.Millisecond):
+				finishCount++
+				break
 			}
 		}
 		// sort interface to find median of matchIndex
@@ -522,14 +532,17 @@ func (rf *Raft) commit() {
 			}
 			sortMatchIndex = append(sortMatchIndex, mIndex { id: i, index: rf.matchIndex[i] })
 		}
+		sortMatchIndex = append(sortMatchIndex, mIndex { id: rf.me, index: len(rf.logs) })
 		sort.Sort(sortMatchIndex)
 
 		// for debug
 		//fmt.Println(rf.nextIndex)
 		//fmt.Println(sortMatchIndex)
-		// fmt.Println(sortMatchIndex)
 
-		rf.commitIndex = sortMatchIndex[len(rf.peers) / 2].index
+		rf.applyCond.L.Lock()
+		rf.commitIndex = sortMatchIndex[len(rf.peers) / 2 - 1].index // and leader
+		rf.applyCond.Broadcast()
+		rf.applyCond.L.Unlock()
  	}
 }
 
@@ -596,7 +609,7 @@ func (rf *Raft) run() {
 				}
 			}
 		}
-		time.Sleep(1e6)
+		time.Sleep(10 * time.Millisecond)
 		if rf.killed() {
 			return
 		}
@@ -622,6 +635,7 @@ func (rf *Raft) elect() {
 		case <- rf.timeout.InElection:
 			type VoteResult struct { 
 				id int
+				ok bool
 				reply RequestVoteReply
 			}
 			voteResultChan := make(chan VoteResult)
@@ -637,10 +651,7 @@ func (rf *Raft) elect() {
 					}
 					reply := RequestVoteReply {}
 					ok := rf.sendRequestVote(id, &args, &reply)
-					if ok == false {
-						voteResultChan <- VoteResult {id: id, reply: reply}
-					}
-					voteResultChan <- VoteResult {id: id, reply: reply}
+					voteResultChan <- VoteResult {id: id, ok: ok, reply: reply}
 				} (i)
 			}
 
@@ -651,6 +662,9 @@ func (rf *Raft) elect() {
 					finishCnt++
 					if finishCnt == len(rf.peers) - 1 {
 						break
+					}
+					if result.ok == false {
+						continue
 					}
 					if result.reply.ReturnValue == 1 {
 						rf.getVotes++
@@ -700,16 +714,16 @@ func (rf *Raft) elect() {
 
 func (rf *Raft) applyLog() {
 	for !rf.killed() {
-		time.Sleep(time.Millisecond * 1)
-		if rf.commitIndex > rf.lastApplied {
-			// for debug
-			//fmt.Println(rf.me, rf.state, rf.commitIndex, rf.lastApplied)
-			rf.lastApplied++
-			rf.applyCh <- ApplyMsg {
-				CommandValid: true,
-				Command: rf.logs[rf.lastApplied - 1].Command,
-				CommandIndex: rf.logs[rf.lastApplied - 1].Index,
-			}
+		rf.applyCond.L.Lock()
+		for rf.commitIndex <= rf.lastApplied {
+			rf.applyCond.Wait()
+		}
+		rf.lastApplied++
+		rf.applyCond.L.Unlock()
+		rf.applyCh <- ApplyMsg {
+			CommandValid: true,
+			Command: rf.logs[rf.lastApplied - 1].Command,
+			CommandIndex: rf.logs[rf.lastApplied - 1].Index,
 		}
 	}
 }
@@ -746,6 +760,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.applyCh = applyCh
 	rf.lastApplied = 0
 	rf.commitIndex = 0
+	rf.applyCond = sync.NewCond( &sync.Mutex{} )
 	
 	for i := 0; i < len(rf.peers); i++ {
 		rf.nextIndex = append(rf.nextIndex, 1)
